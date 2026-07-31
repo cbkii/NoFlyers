@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">NoFlyers</string>
+    <string name="module_description">Per-app AppsFlyer compatibility and blocking hooks for LSPosed-compatible frameworks.</string>
+    <string-array name="xposed_scope">
+        <item>com.picsart.studio</item>
+    </string-array>
+</resources>
