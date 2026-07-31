@@ -144,12 +144,12 @@ main() {
         failed=1
     else
         cat "$tmp_dir/apksigner.txt" >&2
-        if ! grep -Fq 'Verified using v2 scheme (APK Signature Scheme v2): true' "$tmp_dir/apksigner.txt"; then
-            error 'APK is not protected by APK Signature Scheme v2.'
+        if ! grep -Eq 'Verified using v(2|3) scheme .*: true' "$tmp_dir/apksigner.txt"; then
+            error 'APK is not protected by APK Signature Scheme v2 or v3.'
             failed=1
         fi
-        cert_digest=$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "$tmp_dir/apksigner.txt" | head -n 1 | tr '[:upper:]' '[:lower:]')
-        expected_digest=$(tr -d '[:space:]' < "$asset_dir/CERTIFICATE-SHA256.txt" | tr '[:upper:]' '[:lower:]')
+        cert_digest=$(awk -F': ' '/certificate SHA-256 digest:/{print $NF; exit}' "$tmp_dir/apksigner.txt" | tr '[:upper:]' '[:lower:]')
+        expected_digest=$(awk '/^[[:xdigit:]]{64}$/{print tolower($0); exit}' "$asset_dir/CERTIFICATE-SHA256.txt")
         if [[ -z $cert_digest || $cert_digest != "$expected_digest" ]]; then
             error "Signing certificate mismatch: expected $expected_digest, found ${cert_digest:-<none>}"
             failed=1
