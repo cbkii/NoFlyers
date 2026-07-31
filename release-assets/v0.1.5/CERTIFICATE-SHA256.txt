@@ -1,0 +1,2 @@
+NoFlyers v0.1.5 signing certificate SHA-256
+f03f0dd5f6a1d5798a75fd6de0b34d17a87a2e01d99c79576fefb4de02fbd67e
