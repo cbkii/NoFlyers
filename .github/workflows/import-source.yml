@@ -49,7 +49,7 @@ jobs:
                       raise SystemExit(f'unsafe archive member: {member.name}')
           PY
           tar -xzf "$RUNNER_TEMP/source.tar.gz" -C .
-          rm -rf source-import.parts .github/workflows/import-source.yml source-import.trigger
+          rm -rf source-import.parts source-import.trigger
 
       - name: Generate wrapper, test, lint and build
         shell: bash
@@ -93,10 +93,12 @@ jobs:
             app/build/reports/lint-results-debug.html
             qualification/
 
-      - name: Commit qualified source
+      - name: Commit qualified source without workflow-file changes
         shell: bash
         run: |
           rm -rf qualification
+          git restore --source=HEAD -- .github/workflows/import-source.yml
+          rm -f .github/workflows/ci.yml .github/workflows/release.yml
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -A
