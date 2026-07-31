@@ -22,6 +22,26 @@ public final class HookEntry implements IXposedHookLoadPackage {
     private static final String APP_SET_CLASS = "com.google.android.gms.appset.AppSet";
     private static final String TASKS_CLASS = "com.google.android.gms.tasks.Tasks";
 
+    private static final String[] INTEGRITY_FACTORY_CLASSES = {
+        "com.google.android.play.core.integrity.IntegrityManagerFactory",
+        "com.google.android.play.core.integrity.StandardIntegrityManagerFactory"
+    };
+
+    private static final String[] INTEGRITY_TASK_METHODS = {
+        "requestIntegrityToken",
+        "prepareIntegrityToken",
+        "request"
+    };
+
+    // play-services-tasks 18.1.0 dispatches OnSuccessListener callbacks through zzm.
+    // Adjacent names are included for nearby releases; suppression remains AppsFlyer-NPE-only.
+    private static final String[] TASK_RUNNER_CLASSES = {
+        "com.google.android.gms.tasks.zzm",
+        "com.google.android.gms.tasks.zzn",
+        "com.google.android.gms.tasks.zzl",
+        "com.google.android.gms.tasks.zzk"
+    };
+
     private static final String[] BLOCKED_VOID_METHODS = {
         "start",
         "logEvent",
@@ -51,12 +71,15 @@ public final class HookEntry implements IXposedHookLoadPackage {
             return;
         }
 
+        XposedBridge.log(TAG + " [" + lpparam.packageName + "/" + lpparam.processName
+                + "]: active; mode=" + configuration.mode().storedValue());
+
         ProcessHooks hooks = new ProcessHooks(
                 lpparam.packageName,
                 lpparam.processName,
                 configuration);
 
-        // Fast path: AppsFlyer is normally visible from the package class loader now.
+        // Fast path: AppsFlyer and Google collectors are often visible now.
         try {
             hooks.install(lpparam.classLoader);
         } catch (Throwable error) {
@@ -99,6 +122,12 @@ public final class HookEntry implements IXposedHookLoadPackage {
         private final AtomicBoolean appSetEntryInstalled = new AtomicBoolean(false);
         private final Set<Class<?>> hookedAppSetClients = Collections.newSetFromMap(
                 Collections.synchronizedMap(new WeakHashMap<>()));
+        private final Set<Class<?>> hookedIntegrityFactories = Collections.newSetFromMap(
+                Collections.synchronizedMap(new WeakHashMap<>()));
+        private final Set<Class<?>> hookedIntegrityManagers = Collections.newSetFromMap(
+                Collections.synchronizedMap(new WeakHashMap<>()));
+        private final Set<Class<?>> hookedTaskRunners = Collections.newSetFromMap(
+                Collections.synchronizedMap(new WeakHashMap<>()));
 
         ProcessHooks(
                 String packageName,
@@ -117,6 +146,8 @@ public final class HookEntry implements IXposedHookLoadPackage {
             if (configuration.mode() == HookMode.FAIL_APPSET
                     || configuration.mode() == HookMode.BLOCK) {
                 installAppSetHooks(classLoader);
+                installPlayIntegrityHooks(classLoader);
+                installTaskCrashShield(classLoader);
             }
         }
 
@@ -175,14 +206,20 @@ public final class HookEntry implements IXposedHookLoadPackage {
 
         private void disableIdentifiers(Object appsFlyerInstance) {
             if (appsFlyerInstance == null) {
+                log("AppsFlyer getInstance returned null; no identifier settings applied");
                 return;
             }
+            callOptional(appsFlyerInstance, "disableAppSetId");
+            callOptional(appsFlyerInstance, "setDisableAdvertisingIdentifiers", true);
+        }
+
+        private void callOptional(Object receiver, String methodName, Object... args) {
             try {
-                XposedHelpers.callMethod(appsFlyerInstance, "disableAppSetId");
+                XposedHelpers.callMethod(receiver, methodName, args);
             } catch (NoSuchMethodError | XposedHelpers.ClassNotFoundError error) {
-                log("AppsFlyer SDK has no disableAppSetId method");
+                log("AppsFlyer SDK has no " + methodName + " method");
             } catch (Throwable error) {
-                logError("disableAppSetId failed", error);
+                logError(methodName + " failed", error);
             }
         }
 
@@ -222,21 +259,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
             Set<XC_MethodHook.Unhook> hooks = XposedBridge.hookAllMethods(
                     clientClass,
                     "getAppSetIdInfo",
-                    new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
-                            try {
-                                Object failedTask = XposedHelpers.callStaticMethod(
-                                        tasksClass,
-                                        "forException",
-                                        new IllegalStateException(
-                                                "App Set ID disabled by NoFlyers"));
-                                param.setResult(failedTask);
-                            } catch (Throwable error) {
-                                logError("could not create failed App Set Task", error);
-                            }
-                        }
-                    });
+                    failedTaskHook(tasksClass, "App Set ID disabled by NoFlyers"));
             if (hooks.isEmpty()) {
                 synchronized (hookedAppSetClients) {
                     hookedAppSetClients.remove(clientClass);
@@ -244,6 +267,127 @@ public final class HookEntry implements IXposedHookLoadPackage {
                 log("App Set client has no getAppSetIdInfo method: " + clientClass.getName());
             } else {
                 log("hooked App Set client: " + clientClass.getName());
+            }
+        }
+
+        private void installPlayIntegrityHooks(ClassLoader classLoader) {
+            Class<?> tasksClass = XposedHelpers.findClassIfExists(TASKS_CLASS, classLoader);
+            if (tasksClass == null) {
+                return;
+            }
+
+            for (String factoryName : INTEGRITY_FACTORY_CLASSES) {
+                Class<?> factoryClass = XposedHelpers.findClassIfExists(factoryName, classLoader);
+                if (factoryClass == null) {
+                    continue;
+                }
+                synchronized (hookedIntegrityFactories) {
+                    if (!hookedIntegrityFactories.add(factoryClass)) {
+                        continue;
+                    }
+                }
+
+                Set<XC_MethodHook.Unhook> hooks = XposedBridge.hookAllMethods(
+                        factoryClass,
+                        "create",
+                        new XC_MethodHook() {
+                            @Override
+                            protected void afterHookedMethod(MethodHookParam param) {
+                                Object manager = param.getResult();
+                                if (manager != null) {
+                                    hookIntegrityManager(manager.getClass(), tasksClass);
+                                }
+                            }
+                        });
+                if (hooks.isEmpty()) {
+                    synchronized (hookedIntegrityFactories) {
+                        hookedIntegrityFactories.remove(factoryClass);
+                    }
+                } else {
+                    log("installed Play Integrity factory hook: " + factoryName);
+                }
+            }
+        }
+
+        private void hookIntegrityManager(Class<?> managerClass, Class<?> tasksClass) {
+            synchronized (hookedIntegrityManagers) {
+                if (!hookedIntegrityManagers.add(managerClass)) {
+                    return;
+                }
+            }
+
+            boolean installed = false;
+            for (String methodName : INTEGRITY_TASK_METHODS) {
+                Set<XC_MethodHook.Unhook> hooks = XposedBridge.hookAllMethods(
+                        managerClass,
+                        methodName,
+                        failedTaskHook(tasksClass, "Play Integrity disabled by NoFlyers"));
+                if (!hooks.isEmpty()) {
+                    installed = true;
+                    log("hooked Play Integrity method " + managerClass.getName()
+                            + "." + methodName);
+                }
+            }
+            if (!installed) {
+                synchronized (hookedIntegrityManagers) {
+                    hookedIntegrityManagers.remove(managerClass);
+                }
+            }
+        }
+
+        private XC_MethodHook failedTaskHook(Class<?> tasksClass, String reason) {
+            return new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) {
+                    try {
+                        Object failedTask = XposedHelpers.callStaticMethod(
+                                tasksClass,
+                                "forException",
+                                new IllegalStateException(reason));
+                        param.setResult(failedTask);
+                    } catch (Throwable error) {
+                        logError("could not create failed Google Task", error);
+                    }
+                }
+            };
+        }
+
+        private void installTaskCrashShield(ClassLoader classLoader) {
+            for (String runnerName : TASK_RUNNER_CLASSES) {
+                Class<?> runnerClass = XposedHelpers.findClassIfExists(runnerName, classLoader);
+                if (runnerClass == null) {
+                    continue;
+                }
+                synchronized (hookedTaskRunners) {
+                    if (!hookedTaskRunners.add(runnerClass)) {
+                        continue;
+                    }
+                }
+
+                Set<XC_MethodHook.Unhook> hooks = XposedBridge.hookAllMethods(
+                        runnerClass,
+                        "run",
+                        new XC_MethodHook() {
+                            @Override
+                            protected void afterHookedMethod(MethodHookParam param) {
+                                Throwable throwable = param.getThrowable();
+                                if (!AppsFlyerThrowableClassifier
+                                        .isSuppressibleTaskCallback(throwable)) {
+                                    return;
+                                }
+                                XposedBridge.log(TAG + " [" + packageName + "/" + processName
+                                        + "]: suppressed AppsFlyer Google Task callback NPE: "
+                                        + throwable);
+                                param.setResult(null);
+                            }
+                        });
+                if (hooks.isEmpty()) {
+                    synchronized (hookedTaskRunners) {
+                        hookedTaskRunners.remove(runnerClass);
+                    }
+                } else {
+                    log("installed AppsFlyer Task crash shield: " + runnerName);
+                }
             }
         }
 

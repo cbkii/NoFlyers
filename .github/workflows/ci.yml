@@ -64,6 +64,13 @@ jobs:
             exit 1
           fi
 
+          version_code=$(sed -nE 's/^[[:space:]]*versionCode[[:space:]]*=[[:space:]]*([0-9]+).*/\1/p' app/build.gradle.kts | head -n 1)
+          version_name=$(sed -nE 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' app/build.gradle.kts | head -n 1)
+          if [[ -z $version_code || -z $version_name ]]; then
+            printf 'ERROR: Could not resolve build version metadata.\n' >&2
+            exit 1
+          fi
+
           debug_apk=app/build/outputs/apk/debug/app-debug.apk
           unsigned_apk=app/build/outputs/apk/release/app-release-unsigned.apk
           for apk in "$debug_apk" "$unsigned_apk"; do
@@ -78,7 +85,7 @@ jobs:
           "$build_tools_dir/zipalign" -c -P 16 4 "$unsigned_apk"
 
           badging=$($build_tools_dir/aapt dump badging "$debug_apk")
-          grep -Fq "package: name='io.github.cbkii.noflyers' versionCode='15' versionName='0.1.5'" <<<"$badging"
+          grep -Fq "package: name='io.github.cbkii.noflyers' versionCode='$version_code' versionName='$version_name'" <<<"$badging"
 
       - name: Package qualification evidence
         shell: bash
@@ -102,10 +109,12 @@ jobs:
       - name: Verify committed release asset when present
         shell: bash
         run: |
-          if [[ -s release-assets/v0.1.5/NoFlyers-v0.1.5.apk ]]; then
-            bash scripts/verify-release.sh v0.1.5
+          version_name=$(sed -nE 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' app/build.gradle.kts | head -n 1)
+          tag="v$version_name"
+          if [[ -s "release-assets/$tag/NoFlyers-$tag.apk" ]]; then
+            bash scripts/verify-release.sh "$tag"
           else
-            printf 'Release asset is not committed on this head; source qualification only.\n'
+            printf 'No release asset is committed for %s; source qualification only.\n' "$tag"
           fi
 
       - name: Upload qualification artefact
