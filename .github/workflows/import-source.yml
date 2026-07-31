@@ -1,0 +1,139 @@
+name: Import and qualify source
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/import-source.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: noflyers-source-import
+  cancel-in-progress: false
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out staging branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle 8.13
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+
+      - name: Reconstruct and validate source bundle
+        shell: bash
+        run: |
+          cat source-import.parts/source.part.* | base64 --decode > "$RUNNER_TEMP/source.tar.gz"
+          actual=$(sha256sum "$RUNNER_TEMP/source.tar.gz" | cut -d' ' -f1)
+          expected=1e6fe4910af079f33d1bf6c05541ed53fbc8c8c704e0f276acbd97e4bcf76b4b
+          if [[ $actual != $expected ]]; then
+            printf 'ERROR: source bundle hash mismatch: %s\n' "$actual" >&2
+            exit 1
+          fi
+
+          SOURCE_ARCHIVE="$RUNNER_TEMP/source.tar.gz" python3 - <<'PY'
+          import os
+          import pathlib
+          import tarfile
+
+          archive = pathlib.Path(os.environ["SOURCE_ARCHIVE"])
+          with tarfile.open(archive, "r:gz") as bundle:
+              for member in bundle.getmembers():
+                  path = pathlib.PurePosixPath(member.name)
+                  if path.is_absolute() or ".." in path.parts:
+                      raise SystemExit(f"unsafe archive path: {member.name}")
+                  if member.issym() or member.islnk() or member.isdev():
+                      raise SystemExit(f"unsupported archive member: {member.name}")
+          PY
+
+          tar -xzf "$RUNNER_TEMP/source.tar.gz" -C .
+          rm -rf source-import.parts .github/workflows/import-source.yml
+
+      - name: Generate Gradle wrapper
+        shell: bash
+        run: |
+          gradle --no-daemon wrapper --gradle-version 8.13 --distribution-type bin
+          chmod +x gradlew
+          ./gradlew --version
+
+      - name: Test, lint and build
+        run: >-
+          ./gradlew --no-daemon --stacktrace
+          testDebugUnitTest lintDebug assembleDebug assembleRelease
+
+      - name: Validate build outputs
+        shell: bash
+        run: |
+          sdk_root=${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}
+          build_tools_dir=$(find "$sdk_root/build-tools" -mindepth 1 -maxdepth 1 -type d -print | sort -V | tail -n 1)
+          if [[ -z $build_tools_dir ]]; then
+            printf 'ERROR: Android SDK build-tools are unavailable.\n' >&2
+            exit 1
+          fi
+
+          debug_apk=app/build/outputs/apk/debug/app-debug.apk
+          unsigned_apk=app/build/outputs/apk/release/app-release-unsigned.apk
+          for apk in "$debug_apk" "$unsigned_apk"; do
+            [[ -s $apk ]] || { printf 'ERROR: Missing build output: %s\n' "$apk" >&2; exit 1; }
+          done
+
+          "$build_tools_dir/apksigner" verify --verbose --print-certs "$debug_apk"
+          "$build_tools_dir/zipalign" -c -P 16 4 "$debug_apk"
+          "$build_tools_dir/zipalign" -c -P 16 4 "$unsigned_apk"
+          badging=$("$build_tools_dir/aapt" dump badging "$debug_apk")
+          grep -Fq "package: name='io.github.cbkii.noflyers' versionCode='15' versionName='0.1.5'" <<<"$badging"
+
+      - name: Package qualification evidence
+        shell: bash
+        run: |
+          sdk_root=${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}
+          build_tools_dir=$(find "$sdk_root/build-tools" -mindepth 1 -maxdepth 1 -type d -print | sort -V | tail -n 1)
+          mkdir -p qualification/apksigner/lib qualification/gradle-wrapper
+          cp "$build_tools_dir/apksigner" qualification/apksigner/
+          cp "$build_tools_dir/zipalign" qualification/apksigner/
+          cp "$build_tools_dir/aapt" qualification/apksigner/
+          cp "$build_tools_dir/lib/apksigner.jar" qualification/apksigner/lib/
+          cp -a gradle/wrapper qualification/gradle-wrapper/
+          cp gradlew gradlew.bat qualification/gradle-wrapper/
+          find app/build/outputs/apk -type f -name '*.apk' -print0 | sort -z | xargs -0 sha256sum > qualification/SHA256SUMS-build
+          cat qualification/SHA256SUMS-build
+
+      - name: Upload qualified build
+        uses: actions/upload-artifact@v4
+        with:
+          name: noflyers-import-qualification-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 9
+          path: |
+            app/build/outputs/apk/debug/app-debug.apk
+            app/build/outputs/apk/release/app-release-unsigned.apk
+            app/build/outputs/mapping/release/
+            app/build/reports/tests/
+            app/build/reports/lint-results-debug.html
+            qualification/
+
+      - name: Commit qualified source tree
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'Prepare NoFlyers v0.1.5'
+          git push origin HEAD:main
