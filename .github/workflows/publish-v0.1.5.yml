@@ -1,0 +1,100 @@
+name: Publish NoFlyers v0.1.5
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: noflyers-publish-v0.1.5
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.event.pull_request.head.ref == 'agent/publish-noflyers-v0.1.5'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      SOURCE_SHA: bb2fb458ebc8d17edb24182ba68be92f255f954a
+      RELEASE_TAG: v0.1.5
+
+    steps:
+      - name: Check out exact merged source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: bb2fb458ebc8d17edb24182ba68be92f255f954a
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Verify source and exact release asset
+        shell: bash
+        run: |
+          actual=$(git rev-parse HEAD)
+          if [[ $actual != "$SOURCE_SHA" ]]; then
+            printf 'ERROR: Expected source %s, found %s.\n' "$SOURCE_SHA" "$actual" >&2
+            exit 1
+          fi
+          bash scripts/verify-release.sh "$RELEASE_TAG"
+
+      - name: Attest APK provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: release-assets/v0.1.5/NoFlyers-v0.1.5.apk
+
+      - name: Create exact tag and release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          repo=$GITHUB_REPOSITORY
+          tag=$RELEASE_TAG
+
+          if ref_json=$(gh api "/repos/$repo/git/ref/tags/$tag" 2>/dev/null); then
+            object_type=$(jq -r '.object.type' <<<"$ref_json")
+            object_sha=$(jq -r '.object.sha' <<<"$ref_json")
+            if [[ $object_type == tag ]]; then
+              tagged_sha=$(gh api "/repos/$repo/git/tags/$object_sha" --jq '.object.sha')
+            else
+              tagged_sha=$object_sha
+            fi
+            if [[ $tagged_sha != "$SOURCE_SHA" ]]; then
+              printf 'ERROR: Existing tag %s points to %s, expected %s.\n' "$tag" "$tagged_sha" "$SOURCE_SHA" >&2
+              exit 1
+            fi
+          else
+            tag_object=$(gh api "/repos/$repo/git/tags" \
+              --method POST \
+              -f tag="$tag" \
+              -f message="NoFlyers $tag" \
+              -f object="$SOURCE_SHA" \
+              -f type=commit \
+              --jq '.sha')
+            gh api "/repos/$repo/git/refs" \
+              --method POST \
+              -f ref="refs/tags/$tag" \
+              -f sha="$tag_object" >/dev/null
+          fi
+
+          if gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
+            printf 'Release %s already exists; refusing to overwrite it.\n' "$tag"
+            exit 0
+          fi
+
+          gh release create "$tag" \
+            "release-assets/$tag/NoFlyers-$tag.apk" \
+            "release-assets/$tag/SHA256SUMS" \
+            "release-assets/$tag/CERTIFICATE-SHA256.txt" \
+            --repo "$repo" \
+            --verify-tag \
+            --title "NoFlyers $tag" \
+            --notes-file "release-notes/$tag.md"
