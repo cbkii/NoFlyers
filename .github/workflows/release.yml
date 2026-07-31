@@ -1,0 +1,56 @@
+name: Publish Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: noflyers-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Verify exact prebuilt release artefact
+        shell: bash
+        run: bash scripts/verify-release.sh "${GITHUB_REF_NAME}"
+
+      - name: Attest APK provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: release-assets/${{ github.ref_name }}/NoFlyers-${{ github.ref_name }}.apk
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          tag=${GITHUB_REF_NAME}
+          gh release create "$tag" \
+            "release-assets/$tag/NoFlyers-$tag.apk" \
+            "release-assets/$tag/SHA256SUMS" \
+            "release-assets/$tag/CERTIFICATE-SHA256.txt" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "NoFlyers ${tag}" \
+            --notes-file "release-notes/${tag}.md"
