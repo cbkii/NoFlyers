@@ -7,13 +7,13 @@ public enum HookMode {
     OFF("Off", "Do not change AppsFlyer in this app."),
     COMPAT(
             "Compatibility",
-            "Disable AppsFlyer App Set ID collection before SDK initialisation."),
+            "Disable AppsFlyer App Set ID and advertising-identifier collection before SDK initialisation."),
     FAIL_APPSET(
-            "Compatibility + fail App Set calls",
-            "Also return a completed failed Task from Google App Set ID calls."),
+            "Compatibility + contain Google callbacks",
+            "Also fail App Set ID and Play Integrity calls, then contain only AppsFlyer-origin Google Task null crashes."),
     BLOCK(
             "Full block",
-            "Prevent AppsFlyer startup and common outbound event methods."),
+            "Contain Google collector failures and prevent AppsFlyer startup and common outbound event methods."),
     DEFAULT("Use default", "Use the module-wide default mode.");
 
     private final String label;
