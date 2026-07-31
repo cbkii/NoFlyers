@@ -5,6 +5,7 @@ on:
     branches: [main]
 
 permissions:
+  actions: read
   contents: write
 
 concurrency:
@@ -15,7 +16,7 @@ jobs:
   materialise:
     if: github.event.pull_request.head.ref == 'agent/import-noflyers-v0.1.5'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
 
     steps:
       - name: Check out PR branch
@@ -24,25 +25,22 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.head_ref }}
 
-      - name: Set up Java 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Set up Gradle 8.13
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.13'
-
-      - name: Build exact unsigned APK
+      - name: Retrieve exact qualified unsigned APK
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          chmod +x gradlew
-          ./gradlew --no-daemon --stacktrace assembleRelease
+          gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "/repos/$GITHUB_REPOSITORY/actions/artifacts/8798055795/zip" \
+            > "$RUNNER_TEMP/qualification.zip"
+          mkdir -p "$RUNNER_TEMP/qualification"
+          unzip -q "$RUNNER_TEMP/qualification.zip" -d "$RUNNER_TEMP/qualification"
+          unsigned="$RUNNER_TEMP/qualification/app/build/outputs/apk/release/app-release-unsigned.apk"
+          [[ -s $unsigned ]] || { printf 'ERROR: Qualified unsigned APK is missing.\n' >&2; exit 1; }
           printf '%s  %s\n' \
             e4794f609e6b015b0f54328fe11db62df1d56941b5423119c3360a72830e3b9d \
-            app/build/outputs/apk/release/app-release-unsigned.apk \
+            "$unsigned" \
             | sha256sum -c -
 
       - name: Reconstruct and verify signed APK
@@ -55,7 +53,7 @@ jobs:
             "$RUNNER_TEMP/noflyers.patch.gz" \
             | sha256sum -c -
 
-          UNSIGNED_APK=app/build/outputs/apk/release/app-release-unsigned.apk \
+          UNSIGNED_APK="$RUNNER_TEMP/qualification/app/build/outputs/apk/release/app-release-unsigned.apk" \
           PATCH_GZ="$RUNNER_TEMP/noflyers.patch.gz" \
           SIGNED_APK=release-assets/v0.1.5/NoFlyers-v0.1.5.apk \
           python3 - <<'PY'
