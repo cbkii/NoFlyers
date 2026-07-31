@@ -1,0 +1,124 @@
+name: Qualify APK
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: noflyers-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  qualify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle 8.13
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+
+      - name: Generate or verify Gradle wrapper
+        shell: bash
+        run: |
+          if [[ ! -f gradle/wrapper/gradle-wrapper.jar ]]; then
+            gradle --no-daemon wrapper --gradle-version 8.13 --distribution-type bin
+          fi
+          chmod +x gradlew
+          ./gradlew --version
+
+      - name: Test, lint and build
+        run: >-
+          ./gradlew --no-daemon --stacktrace
+          testDebugUnitTest lintDebug assembleDebug assembleRelease
+
+      - name: Validate build outputs
+        shell: bash
+        run: |
+          sdk_root=${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}
+          if [[ -z $sdk_root || ! -d $sdk_root/build-tools ]]; then
+            printf 'ERROR: Android SDK build-tools directory is unavailable.\n' >&2
+            exit 1
+          fi
+
+          build_tools_dir=$(find "$sdk_root/build-tools" -mindepth 1 -maxdepth 1 -type d -print | sort -V | tail -n 1)
+          if [[ -z $build_tools_dir ]]; then
+            printf 'ERROR: No Android SDK build-tools installation was found.\n' >&2
+            exit 1
+          fi
+
+          debug_apk=app/build/outputs/apk/debug/app-debug.apk
+          unsigned_apk=app/build/outputs/apk/release/app-release-unsigned.apk
+          for apk in "$debug_apk" "$unsigned_apk"; do
+            if [[ ! -s $apk ]]; then
+              printf 'ERROR: Missing or empty build output: %s\n' "$apk" >&2
+              exit 1
+            fi
+          done
+
+          "$build_tools_dir/apksigner" verify --verbose --print-certs "$debug_apk"
+          "$build_tools_dir/zipalign" -c -P 16 4 "$debug_apk"
+          "$build_tools_dir/zipalign" -c -P 16 4 "$unsigned_apk"
+
+          badging=$($build_tools_dir/aapt dump badging "$debug_apk")
+          grep -Fq "package: name='io.github.cbkii.noflyers' versionCode='15' versionName='0.1.5'" <<<"$badging"
+
+      - name: Package qualification evidence
+        shell: bash
+        run: |
+          sdk_root=${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}
+          build_tools_dir=$(find "$sdk_root/build-tools" -mindepth 1 -maxdepth 1 -type d -print | sort -V | tail -n 1)
+
+          mkdir -p qualification/apksigner/lib qualification/gradle-wrapper
+          cp "$build_tools_dir/apksigner" qualification/apksigner/
+          cp "$build_tools_dir/zipalign" qualification/apksigner/
+          cp "$build_tools_dir/aapt" qualification/apksigner/
+          cp "$build_tools_dir/lib/apksigner.jar" qualification/apksigner/lib/
+          cp -a gradle/wrapper qualification/gradle-wrapper/
+          cp gradlew gradlew.bat qualification/gradle-wrapper/
+
+          find app/build/outputs/apk -type f -name '*.apk' -print0 \
+            | sort -z \
+            | xargs -0 sha256sum > qualification/SHA256SUMS-build
+          cat qualification/SHA256SUMS-build
+
+      - name: Verify committed release asset when present
+        shell: bash
+        run: |
+          if [[ -s release-assets/v0.1.5/NoFlyers-v0.1.5.apk ]]; then
+            bash scripts/verify-release.sh v0.1.5
+          else
+            printf 'Release asset is not committed on this head; source qualification only.\n'
+          fi
+
+      - name: Upload qualification artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: noflyers-qualification-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 9
+          path: |
+            app/build/outputs/apk/debug/app-debug.apk
+            app/build/outputs/apk/release/app-release-unsigned.apk
+            app/build/outputs/mapping/release/
+            app/build/reports/tests/
+            app/build/reports/lint-results-debug.html
+            qualification/
