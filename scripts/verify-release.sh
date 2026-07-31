@@ -69,9 +69,27 @@ require_archive_entry() {
     return 0
 }
 
+read_build_version() {
+    local field=$1
+    local build_file='app/build.gradle.kts'
+
+    case $field in
+        code)
+            sed -nE 's/^[[:space:]]*versionCode[[:space:]]*=[[:space:]]*([0-9]+).*/\1/p' "$build_file" | head -n 1
+            ;;
+        name)
+            sed -nE 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' "$build_file" | head -n 1
+            ;;
+        *)
+            return 2
+            ;;
+    esac
+}
+
 main() {
     local tag=${1:-}
-    local expected_tag='v0.1.5'
+    local expected_version_code=''
+    local expected_version_name=''
     local apk=''
     local asset_dir=''
     local apksigner=''
@@ -83,8 +101,23 @@ main() {
     local expected_digest=''
     local failed=0
 
-    if [[ $tag != "$expected_tag" ]]; then
-        error "Expected release tag $expected_tag, received ${tag:-<empty>}"
+    if [[ ! $tag =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+        error "Release tag is missing or invalid: ${tag:-<empty>}"
+        print_summary 'FAILED'
+        return 2
+    fi
+
+    expected_version_code=$(read_build_version code)
+    expected_version_name=$(read_build_version name)
+
+    if [[ -z $expected_version_code || -z $expected_version_name ]]; then
+        error 'Could not read versionCode and versionName from app/build.gradle.kts.'
+        print_summary 'FAILED'
+        return 1
+    fi
+
+    if [[ $tag != "v$expected_version_name" ]]; then
+        error "Tag $tag does not match build version v$expected_version_name."
         print_summary 'FAILED'
         return 2
     fi
@@ -162,8 +195,8 @@ main() {
         error 'Could not read APK package metadata.'
         failed=1
     else
-        if ! grep -Fq "package: name='io.github.cbkii.noflyers' versionCode='15' versionName='0.1.5'" <<<"$badging"; then
-            error 'APK package name or version does not match NoFlyers v0.1.5.'
+        if ! grep -Fq "package: name='io.github.cbkii.noflyers' versionCode='$expected_version_code' versionName='$expected_version_name'" <<<"$badging"; then
+            error "APK package or version does not match io.github.cbkii.noflyers $expected_version_name ($expected_version_code)."
             failed=1
         fi
         if grep -Fq 'application-debuggable' <<<"$badging"; then
